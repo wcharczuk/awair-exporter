@@ -121,7 +121,7 @@ func (rw *responseWriter) Write(data []byte) (n int, err error) {
 }
 
 func getSensors(rw http.ResponseWriter, r *http.Request) {
-	rw.Header().Set(http.CanonicalHeaderKey("Content-Type"), "application/json")
+	rw.Header().Set(http.CanonicalHeaderKey("Content-Type"), "application/json; charset=utf-8"")
 	rw.WriteHeader(http.StatusOK)
 	json.NewEncoder(rw).Encode(awairSensors)
 }
