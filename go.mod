@@ -1,3 +1,3 @@
-module github.com/wcharczuk/sensor-bus
+module github.com/wcharczuk/awair-exporter
 
-go 1.15
+go 1.16

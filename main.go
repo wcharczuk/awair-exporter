@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"expvar"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -14,36 +16,65 @@ import (
 	"time"
 )
 
-var (
-	varSensors         = new(expvar.Int)
-	varRequests        = new(expvar.Int)
-	varRequestTimeouts = new(expvar.Int)
-	varRequestErrors   = new(expvar.Int)
-	varRequestElapsed  = new(expvar.Float)
-)
-
 // these may change based on DHCP settings.
 var awairSensors = map[string]string{
 	"Bedroom":     "192.168.53.1",
 	"Living Room": "192.168.53.235",
 }
 
+var (
+	flagLogHide     = flag.Bool("hide-log", false, "If we should suppress all log output")
+	flagLogHideDate = flag.Bool("hide-log-date", false, "If we should omit the date from log output")
+	flagLogHideFile = flag.Bool("hide-log-file", false, "If we should omit the file from log output")
+)
+
+var (
+	varAwairSensorCount                 = new(expvar.Int)
+	varHTTPRequestCount                 = new(expvar.Int)
+	varHTTPRequestDeadlineExceededCount = new(expvar.Int)
+	varHTTPRequestCanceledCount         = new(expvar.Int)
+	varHTTPRequestErrorCount            = new(expvar.Int)
+	varHTTPRequestElapsedLast           = new(expvar.Float)
+	varHTTPRequestElapsedAvg            = new(expvar.Float)
+	varHTTPRequestElapsedP95            = new(expvar.Float)
+	varHTTPRequestElapsedMin            = new(expvar.Float)
+	varHTTPRequestElapsedMax            = new(expvar.Float)
+)
+
 func init() {
-	expvar.Publish("sensors", varRequests)
-	expvar.Publish("requests", varRequests)
-	expvar.Publish("request.timeouts", varRequestTimeouts)
-	expvar.Publish("request.errors", varRequestErrors)
-	expvar.Publish("request.elapsed", varRequestElapsed)
+	expvar.Publish("awair.sensor.count", varAwairSensorCount)
+	expvar.Publish("http.request.count", varHTTPRequestCount)
+	expvar.Publish("http.request.deadline_exceeded.count", varHTTPRequestDeadlineExceededCount)
+	expvar.Publish("http.request.canceled.count", varHTTPRequestCanceledCount)
+	expvar.Publish("http.request.error.count", varHTTPRequestErrorCount)
+	expvar.Publish("http.request.elapsed.last", varHTTPRequestElapsedLast)
+	expvar.Publish("http.request.elapsed.avg", varHTTPRequestElapsedAvg)
+	expvar.Publish("http.request.elapsed.p95", varHTTPRequestElapsedP95)
+	expvar.Publish("http.request.elapsed.min", varHTTPRequestElapsedMin)
+	expvar.Publish("http.request.elapsed.max", varHTTPRequestElapsedMax)
+
+	flag.Parse()
+
+	if *flagLogHide {
+		log.SetOutput(io.Discard)
+	} else {
+		var logFlags int
+		if !*flagLogHideDate {
+			logFlags |= log.Ldate
+			logFlags |= log.Lmicroseconds
+			logFlags |= log.LUTC
+		}
+		if !*flagLogHideFile {
+			logFlags |= log.Lshortfile
+		}
+		log.SetFlags(logFlags)
+	}
 }
 
 func main() {
-	log.SetFlags(log.Ldate | log.Lmicroseconds | log.LUTC | log.Lshortfile)
-
-	// will also handle /prometheus etc.
 	http.HandleFunc("/", getSensorData)
 	http.HandleFunc("/sensors", getSensors)
 	http.HandleFunc("/prometheus", getSensorData)
-	// http.HandleFunc("/debug/vars", expvar.Handler)
 
 	server := &http.Server{
 		Addr:    bindAddr(),
@@ -68,56 +99,26 @@ type loggedHandler struct {
 }
 
 func (lh loggedHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	varRequests.Add(1)
+	varHTTPRequestCount.Add(1)
+
 	start := time.Now()
 	irw := &responseWriter{ResponseWriter: rw}
+
 	defer func() {
 		if irw.statusCode != http.StatusOK {
-			varRequestErrors.Add(1)
+			varHTTPRequestErrorCount.Add(1)
 		}
-		if r.Context().Err() != nil {
-			varRequestTimeouts.Add(1)
+		contextErr := r.Context().Err()
+		if contextErr == context.DeadlineExceeded {
+			varHTTPRequestDeadlineExceededCount.Add(1)
+		} else if contextErr == context.Canceled {
+			varHTTPRequestCanceledCount.Add(1)
 		}
-		varRequestElapsed.Set(float64(time.Since(start)) / float64(time.Millisecond))
+
+		varHTTPRequestElapsedLast.Set(float64(time.Since(start)) / float64(time.Millisecond))
 		log.Println(fmt.Sprintf("%s %d %s %v", r.URL.Path, irw.statusCode, formatContentLength(irw.contentLength), time.Since(start)))
 	}()
 	lh.Server.ServeHTTP(irw, r)
-}
-
-const (
-	sizeofByte = 1 << (10 * iota)
-	sizeofKilobyte
-	sizeofMegabyte
-	sizeofGigabyte
-)
-
-func formatContentLength(contentLength uint64) string {
-	if contentLength >= sizeofGigabyte {
-		return fmt.Sprintf("%0.2fgB", float64(contentLength)/float64(sizeofGigabyte))
-	} else if contentLength >= sizeofMegabyte {
-		return fmt.Sprintf("%0.2fmB", float64(contentLength)/float64(sizeofMegabyte))
-	} else if contentLength >= sizeofKilobyte {
-		return fmt.Sprintf("%0.2fkB", float64(contentLength)/float64(sizeofKilobyte))
-	}
-	return fmt.Sprintf("%dB", contentLength)
-}
-
-type responseWriter struct {
-	http.ResponseWriter
-
-	statusCode    int
-	contentLength uint64
-}
-
-func (rw *responseWriter) WriteHeader(statusCode int) {
-	rw.statusCode = statusCode
-	rw.ResponseWriter.WriteHeader(statusCode)
-}
-
-func (rw *responseWriter) Write(data []byte) (n int, err error) {
-	n, err = rw.ResponseWriter.Write(data)
-	rw.contentLength += uint64(n)
-	return
 }
 
 func getSensors(rw http.ResponseWriter, r *http.Request) {
@@ -237,5 +238,43 @@ func getJSON(ctx context.Context, req *http.Request, output interface{}) (err er
 		return fmt.Errorf("non-200 returned from remote")
 	}
 	err = json.NewDecoder(res.Body).Decode(output)
+	return
+}
+
+// net/http helpers
+
+const (
+	sizeofByte = 1 << (10 * iota)
+	sizeofKilobyte
+	sizeofMegabyte
+	sizeofGigabyte
+)
+
+func formatContentLength(contentLength uint64) string {
+	if contentLength >= sizeofGigabyte {
+		return fmt.Sprintf("%0.2fgB", float64(contentLength)/float64(sizeofGigabyte))
+	} else if contentLength >= sizeofMegabyte {
+		return fmt.Sprintf("%0.2fmB", float64(contentLength)/float64(sizeofMegabyte))
+	} else if contentLength >= sizeofKilobyte {
+		return fmt.Sprintf("%0.2fkB", float64(contentLength)/float64(sizeofKilobyte))
+	}
+	return fmt.Sprintf("%dB", contentLength)
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+
+	statusCode    int
+	contentLength uint64
+}
+
+func (rw *responseWriter) WriteHeader(statusCode int) {
+	rw.statusCode = statusCode
+	rw.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (rw *responseWriter) Write(data []byte) (n int, err error) {
+	n, err = rw.ResponseWriter.Write(data)
+	rw.contentLength += uint64(n)
 	return
 }
