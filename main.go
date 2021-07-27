@@ -23,6 +23,7 @@ var awairSensors = map[string]string{
 }
 
 var (
+	flagBindAddr    = flag.String("bind-addr", "", "The http server bind address (e.g. `127.0.0.1:8081`)")
 	flagLogHide     = flag.Bool("hide-log", false, "If we should suppress all log output")
 	flagLogHideDate = flag.Bool("hide-log-date", false, "If we should omit the date from log output")
 	flagLogHideFile = flag.Bool("hide-log-file", false, "If we should omit the file from log output")
@@ -88,6 +89,9 @@ func main() {
 }
 
 func bindAddr() string {
+	if *flagBindAddr != "" {
+		return *flagBindAddr
+	}
 	if value := os.Getenv("BIND_ADDR"); value != "" {
 		return value
 	}
