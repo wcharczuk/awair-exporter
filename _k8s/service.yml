@@ -3,10 +3,11 @@ kind: Service
 metadata:
   name: awair-exporter
 spec:
-  type: ClusterIP
+  type: LoadBalancer
   selector:
     app: awair-exporter
   ports:
     - protocol: TCP
-      port: 80
+      name: http
+      port: 8080
       targetPort: 8080

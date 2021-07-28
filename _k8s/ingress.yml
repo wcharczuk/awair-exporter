@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: awair-exporter
+spec:
+  rules:
+  - host: awair-exporter.skynet.vpn.charczuk.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: awair-exporter
+            port:
+              number: 8080
+

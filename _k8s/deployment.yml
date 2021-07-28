@@ -17,5 +17,8 @@ spec:
       containers:
         - name: awair-exporter
           image: localhost:32000/awair-exporter:latest
+          env:
+            - name: "BIND_ADDR"
+              value: "0.0.0.0:8080"
           ports:
             - containerPort: 8080

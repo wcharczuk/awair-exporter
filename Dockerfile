@@ -1,7 +1,5 @@
 FROM golang:1.16-alpine
 
-RUN apk --no-cache add ca-certificates
-
 WORKDIR "/go/src"
 
 ADD go.mod /go/src/go.mod
