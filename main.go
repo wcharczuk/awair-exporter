@@ -72,6 +72,16 @@ func init() {
 	}
 }
 
+func bindAddr() string {
+	if *flagBindAddr != "" {
+		return *flagBindAddr
+	}
+	if value := os.Getenv("BIND_ADDR"); value != "" {
+		return value
+	}
+	return "127.0.0.1:8080"
+}
+
 func main() {
 	http.HandleFunc("/", getSensorData)
 	http.HandleFunc("/sensors", getSensors)
@@ -86,16 +96,6 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func bindAddr() string {
-	if *flagBindAddr != "" {
-		return *flagBindAddr
-	}
-	if value := os.Getenv("BIND_ADDR"); value != "" {
-		return value
-	}
-	return "127.0.0.1:8081"
 }
 
 type loggedHandler struct {

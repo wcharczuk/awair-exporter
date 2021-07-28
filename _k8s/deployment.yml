@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: awair-exporter
+  labels:
+    app: awair-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: awair-exporter
+  template:
+    metadata:
+      labels:
+        app: awair-exporter
+    spec:
+      containers:
+        - name: awair-exporter
+          image: localhost:32000/awair-exporter:latest
+          ports:
+            - containerPort: 8080
