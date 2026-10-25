@@ -1,3 +1,3 @@
 module github.com/wcharczuk/awair-exporter
 
-go 1.16
+go 1.18

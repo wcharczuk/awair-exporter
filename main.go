@@ -12,15 +12,38 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
-// these may change based on DHCP settings.
-var awairSensors = map[string]string{
-	"Bedroom":     "192.168.53.1",
-	"Living Room": "192.168.53.235",
+// awairSensors maps a sensor name to its host, from `--sensor name=host` flags.
+// Prefer the sensor's mDNS name (e.g. AWAIR-ELEM-142484.local) to its IP; IPs
+// may change based on DHCP settings.
+var awairSensors = sensorFlags{}
+
+type sensorFlags map[string]string
+
+func (sf sensorFlags) String() string {
+	var pairs []string
+	for name, host := range sf {
+		pairs = append(pairs, name+"="+host)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",")
 }
+
+func (sf sensorFlags) Set(value string) error {
+	name, host, ok := strings.Cut(value, "=")
+	if !ok || name == "" || host == "" {
+		return fmt.Errorf("expected name=host, got %q", value)
+	}
+	sf[name] = host
+	return nil
+}
+
+// sensorTimeout bounds each sensor fetch, so a sensor that's down doesn't hold up the others.
+const sensorTimeout = 5 * time.Second
 
 var (
 	flagBindAddr    = flag.String("bind-addr", "", "The http server bind address (e.g. `127.0.0.1:8081`)")
@@ -54,7 +77,9 @@ func init() {
 	expvar.Publish("http.request.elapsed.min", varHTTPRequestElapsedMin)
 	expvar.Publish("http.request.elapsed.max", varHTTPRequestElapsedMax)
 
+	flag.Var(awairSensors, "sensor", "A sensor to poll, as `name=host` (repeatable)")
 	flag.Parse()
+	varAwairSensorCount.Set(int64(len(awairSensors)))
 
 	if *flagLogHide {
 		log.SetOutput(io.Discard)
@@ -86,6 +111,7 @@ func main() {
 	http.HandleFunc("/", getSensorData)
 	http.HandleFunc("/sensors", getSensors)
 	http.HandleFunc("/prometheus", getSensorData)
+	http.HandleFunc("/metrics", getSensorData)
 
 	server := &http.Server{
 		Addr:    bindAddr(),
@@ -133,57 +159,75 @@ func getSensors(rw http.ResponseWriter, r *http.Request) {
 
 func getSensorData(rw http.ResponseWriter, r *http.Request) {
 	sensorData := map[string]*Awair{}
-	var sensors []string
 	var resultsMu sync.Mutex
 
 	var wg sync.WaitGroup
 	wg.Add(len(awairSensors))
-	errors := make(chan error, len(awairSensors))
 	for sensor, host := range awairSensors {
 		go func(s, h string) {
 			defer wg.Done()
-			data, err := getAwairData(r.Context(), h)
+			ctx, cancel := context.WithTimeout(r.Context(), sensorTimeout)
+			defer cancel()
+			data, err := getAwairData(ctx, h)
 			if err != nil {
-				errors <- err
+				// Reported as awair_up 0; getJSON has logged the error.
 				return
 			}
 			resultsMu.Lock()
 			sensorData[s] = data
-			sensors = append(sensors, s)
 			resultsMu.Unlock()
 		}(sensor, host)
 	}
 	wg.Wait()
 
-	if len(errors) > 0 {
-		http.Error(rw, fmt.Sprintf("error fetching data; %v", <-errors), http.StatusInternalServerError)
-		return
+	var sensors []string
+	for sensor := range awairSensors {
+		sensors = append(sensors, sensor)
 	}
-
 	sort.Strings(sensors)
 
-	rw.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	rw.Header().Add("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	rw.WriteHeader(http.StatusOK)
 
+	fmt.Fprintln(rw, "# HELP awair_up Whether the sensor answered (1) or not (0).")
+	fmt.Fprintln(rw, "# TYPE awair_up gauge")
 	for _, sensor := range sensors {
-		data, ok := sensorData[sensor]
-		if !ok {
-			continue
+		up := 0
+		if _, ok := sensorData[sensor]; ok {
+			up = 1
 		}
-
-		fmt.Fprintf(rw, "awair_score{sensor=%q} %f\n", sensor, data.Score)
-		fmt.Fprintf(rw, "awair_dew_point{sensor=%q} %f\n", sensor, data.DewPoint)
-		fmt.Fprintf(rw, "awair_temp{sensor=%q} %f\n", sensor, data.Temp)
-		fmt.Fprintf(rw, "awair_humid{sensor=%q} %f\n", sensor, data.Humid)
-		fmt.Fprintf(rw, "awair_co2{sensor=%q} %f\n", sensor, data.CO2)
-		fmt.Fprintf(rw, "awair_voc{sensor=%q} %f\n", sensor, data.VOC)
-		fmt.Fprintf(rw, "awair_voc_baseline{sensor=%q} %f\n", sensor, data.VOCBaseline)
-		fmt.Fprintf(rw, "awair_voc_h2_raw{sensor=%q} %f\n", sensor, data.VOCH2Raw)
-		fmt.Fprintf(rw, "awair_voc_ethanol_raw{sensor=%q} %f\n", sensor, data.VOCEthanolRaw)
-		fmt.Fprintf(rw, "awair_pm25{sensor=%q} %f\n", sensor, data.PM25)
-		fmt.Fprintf(rw, "awair_pm10_est{sensor=%q} %f\n", sensor, data.PM10Est)
+		fmt.Fprintf(rw, "awair_up{sensor=%q} %d\n", sensor, up)
 	}
-	return
+
+	// The text format wants each metric's samples together, so write a
+	// metric at a time across sensors.
+	for _, m := range awairMetrics {
+		fmt.Fprintf(rw, "# HELP %s %s\n", m.name, m.help)
+		fmt.Fprintf(rw, "# TYPE %s gauge\n", m.name)
+		for _, sensor := range sensors {
+			if data, ok := sensorData[sensor]; ok {
+				fmt.Fprintf(rw, "%s{sensor=%q} %f\n", m.name, sensor, m.value(data))
+			}
+		}
+	}
+}
+
+var awairMetrics = []struct {
+	name, help string
+	value      func(*Awair) float64
+}{
+	{"awair_score", "Awair score, 0-100.", func(a *Awair) float64 { return a.Score }},
+	{"awair_dew_point", "Dew point, in degrees Celsius.", func(a *Awair) float64 { return a.DewPoint }},
+	{"awair_temp", "Temperature, in degrees Celsius.", func(a *Awair) float64 { return a.Temp }},
+	{"awair_humid", "Relative humidity, in percent.", func(a *Awair) float64 { return a.Humid }},
+	{"awair_abs_humid", "Absolute humidity, in grams per cubic meter.", func(a *Awair) float64 { return a.AbsHumid }},
+	{"awair_co2", "Carbon dioxide, in ppm.", func(a *Awair) float64 { return a.CO2 }},
+	{"awair_voc", "Total volatile organic compounds, in ppb.", func(a *Awair) float64 { return a.VOC }},
+	{"awair_voc_baseline", "VOC sensor baseline.", func(a *Awair) float64 { return a.VOCBaseline }},
+	{"awair_voc_h2_raw", "VOC sensor raw hydrogen signal.", func(a *Awair) float64 { return a.VOCH2Raw }},
+	{"awair_voc_ethanol_raw", "VOC sensor raw ethanol signal.", func(a *Awair) float64 { return a.VOCEthanolRaw }},
+	{"awair_pm25", "Fine particulate matter (PM2.5), in micrograms per cubic meter.", func(a *Awair) float64 { return a.PM25 }},
+	{"awair_pm10_est", "Estimated coarse particulate matter (PM10), in micrograms per cubic meter.", func(a *Awair) float64 { return a.PM10Est }},
 }
 
 // Awair is the latest awair data from a sensor.
@@ -193,6 +237,7 @@ type Awair struct {
 	DewPoint      float64   `json:"dew_point"`
 	Temp          float64   `json:"temp"`
 	Humid         float64   `json:"humid"`
+	AbsHumid      float64   `json:"abs_humid"`
 	CO2           float64   `json:"co2"`
 	VOC           float64   `json:"voc"`
 	VOCBaseline   float64   `json:"voc_baseline"`
