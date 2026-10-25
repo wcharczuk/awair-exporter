@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -44,6 +45,14 @@ func (sf sensorFlags) Set(value string) error {
 
 // sensorTimeout bounds each sensor fetch, so a sensor that's down doesn't hold up the others.
 const sensorTimeout = 5 * time.Second
+
+// sensorClient connects over IPv4 only. Sensors have no IPv6 address, and on
+// macOS an mDNS (.local) lookup that also asks for one waits 5 s for it.
+var sensorClient = &http.Client{Transport: &http.Transport{
+	DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp4", addr)
+	},
+}}
 
 var (
 	flagBindAddr    = flag.String("bind-addr", "", "The http server bind address (e.g. `127.0.0.1:8081`)")
@@ -278,7 +287,7 @@ func getJSON(ctx context.Context, req *http.Request, output interface{}) (err er
 
 	req = req.WithContext(ctx)
 	var res *http.Response
-	res, err = http.DefaultClient.Do(req)
+	res, err = sensorClient.Do(req)
 	if err != nil {
 		return
 	}
